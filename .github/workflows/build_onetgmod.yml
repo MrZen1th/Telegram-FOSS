@@ -204,6 +204,31 @@ jobs:
           echo "=== outputs ==="
           find TMessagesProj_App/build/outputs/apk -name '*.apk' -exec ls -lh {} +
 
+      - name: Debug info (addr2line для зсуву краху)
+        run: |
+          set -uo pipefail
+          LIB="$(find . -name 'libtmessages*.so' -path '*arm64-v8a*' -size +20M -not -path './TMessagesProj_App/*' | head -n1)"
+          echo "unstripped lib: ${LIB:-none}"
+          if [ -z "${LIB:-}" ]; then exit 0; fi
+          A2L="$ANDROID_HOME/ndk/21.4.7075529/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-addr2line"
+          if [ ! -x "$A2L" ]; then A2L="$(command -v llvm-addr2line || command -v addr2line)"; fi
+          echo "addr2line: $A2L"
+          BASE="$(nm --defined-only "$LIB" 2>/dev/null | grep 'processRequestQueue' | head -n1 | awk '{print $1}')"
+          echo "processRequestQueue base: ${BASE:-none}"
+          if [ -n "${BASE:-}" ]; then
+            PC="$(python3 -c "print(hex(int('${BASE}', 16) + 8784))")"
+            echo "=== addr2line PC=$PC (processRequestQueue+8784) ==="
+            "$A2L" -f -C -i -e "$LIB" "$PC" || true
+            echo "=== вікно навколо PC ==="
+            for d in -64 -48 -32 -16 0 16 32 48 64; do
+              ADDR="$(python3 -c "print(hex(int('${BASE}', 16) + 8784 + ($d)))")"
+              echo "--- ${d}: $ADDR"
+              "$A2L" -f -C -i -e "$LIB" "$ADDR" 2>/dev/null | head -4 || true
+            done
+          fi
+          echo "=== карта функцій поряд (символи) ==="
+          nm --defined-only -C "$LIB" 2>/dev/null | sort | grep -A2 -B2 'processRequestQueue' | head -10
+
       - name: Sign + align APK
         run: |
           set -euo pipefail
