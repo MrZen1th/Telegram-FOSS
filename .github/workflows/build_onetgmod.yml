@@ -20,10 +20,12 @@ jobs:
           java-version: "11"
           distribution: "temurin"
 
-      - name: Install Native Build Tools
+      - name: Install Native Build Tools & NDK 21 Compatibility Libs
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y yasm nasm ninja-build cmake build-essential pkg-config
+          sudo apt-get install -y yasm nasm ninja-build cmake build-essential pkg-config libncurses6
+          sudo ln -sf /usr/lib/x86_64-linux-gnu/libncursesw.so.6 /usr/lib/x86_64-linux-gnu/libncurses.so.5
+          sudo ln -sf /usr/lib/x86_64-linux-gnu/libtinfo.so.6 /usr/lib/x86_64-linux-gnu/libtinfo.so.5
 
       - name: Accept Android SDK Licenses and Install NDK
         run: |
@@ -38,13 +40,15 @@ jobs:
           export NDK="$ANDROID_HOME/ndk/21.4.7075529"
           export ANDROID_NDK_HOME="$NDK"
           export ANDROID_NDK_ROOT="$NDK"
+          export NINJA_PATH="$(command -v ninja)"
+          export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
           cd TMessagesProj/jni
           chmod +x *.sh
           [ -f patch_boringssl.sh ] && ./patch_boringssl.sh
-          [ -f build_boringssl.sh ] && ./build_boringssl.sh
+          [ -f build_boringssl.sh ] && ./build_boringssl.sh arm64-v8a
           [ -f patch_ffmpeg.sh ] && ./patch_ffmpeg.sh
-          [ -f build_ffmpeg_clang.sh ] && ./build_ffmpeg_clang.sh
-          [ -f build_libvpx_clang.sh ] && ./build_libvpx_clang.sh
+          [ -f build_ffmpeg_clang.sh ] && ./build_ffmpeg_clang.sh arm64-v8a
+          [ -f build_libvpx_clang.sh ] && ./build_libvpx_clang.sh arm64-v8a
           ls -lh ffmpeg/build/arm64-v8a/lib/libswscale.a
 
       - name: Prepare API_KEYS and Release Keystore
