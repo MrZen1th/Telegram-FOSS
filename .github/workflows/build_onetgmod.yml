@@ -7,7 +7,7 @@ on:
 
 concurrency:
   group: onetgmod-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -90,9 +90,10 @@ jobs:
           fi
           echo "sdkmanager: $SDK_MGR"
           chmod +x "$SDK_MGR" 2>/dev/null || true
-          yes | "$SDK_MGR" --licenses >/dev/null 2>&1 || true
-          yes | "$SDK_MGR" --sdk_root="$SDK" "platform-tools" "platforms;android-33" \
-                "build-tools;33.0.0" "cmake;$SDK_CMAKE_VERSION" "ndk;$NDK_VERSION" >/dev/null 2>&1 || true
+          yes | "$SDK_MGR" --licenses 2>&1 | tail -3 || true
+          echo "Installing platform-tools + build-tools + platforms via sdkmanager (timeout 180s)..."
+          timeout 180 "$SDK_MGR" --sdk_root="$SDK" "platform-tools" "platforms;android-33"                 "build-tools;33.0.0" 2>&1 | tail -20 || true
+          echo "Skipping NDK & CMake via sdkmanager (direct download below is faster)"
 
           NDK_DIR="$SDK/ndk/$NDK_VERSION"
           if [ ! -f "$NDK_DIR/build/cmake/android.toolchain.cmake" ]; then
