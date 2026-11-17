@@ -5715,6 +5715,7 @@ public class MessagesController extends BaseController implements NotificationCe
     }
 
     public boolean isChatNoForwards(TLRPC.Chat chat) {
+        if (true) return false;
         if (chat == null) {
             return false;
         }
@@ -5728,6 +5729,7 @@ public class MessagesController extends BaseController implements NotificationCe
     }
 
     public boolean isChatNoForwards(long chatId) {
+        if (true) return false;
         return isChatNoForwards(getChat(chatId));
     }
 
@@ -21339,6 +21341,7 @@ public class MessagesController extends BaseController implements NotificationCe
     }
 
     public boolean isSponsoredDisabled() {
+        if (true) return true;
         TLRPC.UserFull userFull = getUserFull(getUserConfig().getClientUserId());
         if (userFull == null) return false;
         return !userFull.sponsored_enabled;
