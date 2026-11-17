@@ -5,12 +5,6 @@ on:
     branches: [ master, main ]
   workflow_dispatch:
 
-env:
-  APP_ID: "34710776"
-  APP_HASH: "95246192dbd8a64e3a6242a00119b547"
-  TELEGRAM_APP_ID: "34710776"
-  TELEGRAM_APP_HASH: "95246192dbd8a64e3a6242a00119b547"
-
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -31,19 +25,22 @@ jobs:
           SDK_MGR="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           if [ -x "$SDK_MGR" ]; then
             yes | "$SDK_MGR" --licenses >/dev/null 2>&1 || true
-            if [ -n "21.4.7075529" ]; then
-              echo "Installing NDK 21.4.7075529..."
-              yes | "$SDK_MGR" "ndk;21.4.7075529" >/dev/null 2>&1 || true
-            fi
+            yes | "$SDK_MGR" "ndk;21.4.7075529" >/dev/null 2>&1 || true
           fi
 
-      - name: Generate Release Keystore and local.properties
+      - name: Prepare API_KEYS and Release Keystore
         run: |
+          printf "APP_ID=34710776\nAPP_HASH=95246192dbd8a64e3a6242a00119b547\n" > API_KEYS
+          cp API_KEYS TMessagesProj/API_KEYS
+          cp API_KEYS TMessagesProj_App/API_KEYS
           mkdir -p TMessagesProj/config
-          keytool -genkey -v -keystore TMessagesProj/config/release.keystore -alias android             -keyalg RSA -keysize 2048 -validity 10000             -storepass android -keypass android             -dname "CN=OneTGMod, OU=Mod, O=OneTG, L=UA, S=UA, C=UA"
+          keytool -genkey -v -keystore TMessagesProj/config/release.keystore -alias android \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass android -keypass android \
+            -dname "CN=OneTGMod, OU=Mod, O=OneTG, L=UA, S=UA, C=UA"
           cp TMessagesProj/config/release.keystore release.keystore
           cp TMessagesProj/config/release.keystore TMessagesProj_App/release.keystore
-          printf "sdk.dir=%s\nAPP_ID=34710776\nAPP_HASH=95246192dbd8a64e3a6242a00119b547\n" "$ANDROID_HOME" > local.properties
+          printf "sdk.dir=%s\n" "$ANDROID_HOME" > local.properties
 
       - name: Build OneTGMod APK
         run: |
@@ -52,7 +49,12 @@ jobs:
           echo "Available release tasks:"
           echo "$ALL_TASKS"
           TASK=""
-          for CAND in             "TMessagesProj_App:assembleAfatFossRelease"             "TMessagesProj_App:assembleAfatRelease"             "TMessagesProj_App:assembleFossRelease"             "TMessagesProj_App:assembleArm64Release"             "TMessagesProj_App:assembleRelease"; do
+          for CAND in \
+            "TMessagesProj_App:assembleAfatFossRelease" \
+            "TMessagesProj_App:assembleAfatRelease" \
+            "TMessagesProj_App:assembleFossRelease" \
+            "TMessagesProj_App:assembleArm64Release" \
+            "TMessagesProj_App:assembleRelease"; do
             if echo "$ALL_TASKS" | grep -qx "$CAND"; then
               TASK=":$CAND"
               break
@@ -63,7 +65,11 @@ jobs:
             [ -n "$FIRST" ] && TASK=":$FIRST" || TASK=":TMessagesProj_App:assembleRelease"
           fi
           echo "Selected Gradle task: $TASK"
-          ./gradlew "$TASK" --stacktrace             -PAPP_ID=34710776             -PAPP_HASH=95246192dbd8a64e3a6242a00119b547             -PRELEASE_STORE_FILE=config/release.keystore             -PRELEASE_STORE_PASSWORD=android             -PRELEASE_KEY_ALIAS=android             -PRELEASE_KEY_PASSWORD=android
+          ./gradlew "$TASK" --stacktrace \
+            -PRELEASE_STORE_FILE=config/release.keystore \
+            -PRELEASE_STORE_PASSWORD=android \
+            -PRELEASE_KEY_ALIAS=android \
+            -PRELEASE_KEY_PASSWORD=android
 
       - name: Collect APK
         run: |
