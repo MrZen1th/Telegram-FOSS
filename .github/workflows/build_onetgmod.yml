@@ -89,7 +89,7 @@ jobs:
             SDK_MGR="$SDK/cmdline-tools/latest/bin/sdkmanager"
           fi
           echo "sdkmanager: $SDK_MGR"
-          chmod +x "$SDK_MGR" || true
+          chmod +x "$SDK_MGR" 2>/dev/null || true
           yes | "$SDK_MGR" --licenses >/dev/null 2>&1 || true
           yes | "$SDK_MGR" --sdk_root="$SDK" "platform-tools" "platforms;android-33" \
                 "build-tools;33.0.0" "cmake;$SDK_CMAKE_VERSION" "ndk;$NDK_VERSION" >/dev/null 2>&1 || true
@@ -97,11 +97,16 @@ jobs:
           NDK_DIR="$SDK/ndk/$NDK_VERSION"
           if [ ! -f "$NDK_DIR/build/cmake/android.toolchain.cmake" ]; then
             echo "NDK $NDK_VERSION відсутній -> пряме завантаження android-ndk-r21e"
-            rm -rf "$NDK_DIR" "$WORK/ndk"; mkdir -p "$NDK_DIR" "$WORK/ndk"
+            rm -rf "$NDK_DIR" "$SDK/ndk/android-ndk-r21e" "$WORK/ndk.zip"
             curl -fL --retry 5 --retry-delay 5 -o "$WORK/ndk.zip" "$NDK_ZIP_URL"
-            unzip -q "$WORK/ndk.zip" -d "$WORK/ndk"
-            mv "$WORK/ndk/android-ndk-r21e/." "$NDK_DIR/"
-            rm -rf "$WORK/ndk" "$WORK/ndk.zip"
+            unzip -q "$WORK/ndk.zip" -d "$SDK/ndk"
+            if [ -d "$SDK/ndk/android-ndk-r21e" ]; then
+              rm -rf "$NDK_DIR"
+              mv "$SDK/ndk/android-ndk-r21e" "$NDK_DIR" \
+                || cp -a "$SDK/ndk/android-ndk-r21e" "$NDK_DIR"
+              rm -rf "$SDK/ndk/android-ndk-r21e"
+            fi
+            rm -f "$WORK/ndk.zip"
           fi
           test -f "$NDK_DIR/build/cmake/android.toolchain.cmake"
           echo "NDK OK: $NDK_DIR"
