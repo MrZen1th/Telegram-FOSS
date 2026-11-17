@@ -7,7 +7,7 @@ on:
 
 concurrency:
   group: onetgmod-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -90,14 +90,21 @@ jobs:
           fi
           echo "sdkmanager: $SDK_MGR"
           chmod +x "$SDK_MGR" 2>/dev/null || true
-          # sdkmanager on ubuntu-latest needs JDK 17+ but Gradle uses JDK 11
+          # sdkmanager на нових runner'ах зібраний під Java 17+ (class file 61), а Gradle тут на JDK 11.
+          JAVA_KEEP="${JAVA_HOME:-}"
+          J17="$(find /opt/hostedtoolcache -maxdepth 3 -type d -name "17*" -path '*jdk*' 2>/dev/null | head -n1 || true)"
+          if [ -n "$J17" ] && [ -x "$J17/bin/java" ]; then
+            echo "sdkmanager -> $J17"
+            export JAVA_HOME="$J17"
+          else
+            echo "JDK 17 не знайдено, лишаю $JAVA_KEEP + SKIP_JDK_VERSION_CHECK"
+          fi
           export SKIP_JDK_VERSION_CHECK=1
-          yes | "$SDK_MGR" --licenses 2>&1 | tail -3 || true
-          echo "Installing SDK components via sdkmanager (timeout 300s)..."
-          timeout 300 "$SDK_MGR" --sdk_root="$SDK" \
-                "platform-tools" "platforms;android-33" \
-                "build-tools;33.0.0" "cmake;$SDK_CMAKE_VERSION" 2>&1 | tail -30 || true
-          echo "NDK skipped in sdkmanager (direct download below is faster)"
+          yes | "$SDK_MGR" --licenses >/dev/null 2>&1 || true
+          timeout 420 "$SDK_MGR" --sdk_root="$SDK" "platform-tools" "platforms;android-33" \
+                "build-tools;33.0.0" "cmake;$SDK_CMAKE_VERSION" >/dev/null 2>&1 || true
+          [ -n "$JAVA_KEEP" ] && export JAVA_HOME="$JAVA_KEEP" && echo "JAVA_HOME back to $JAVA_HOME"
+          ls "$SDK/cmake" 2>/dev/null || true
 
           NDK_DIR="$SDK/ndk/$NDK_VERSION"
           if [ ! -f "$NDK_DIR/build/cmake/android.toolchain.cmake" ]; then
@@ -116,23 +123,17 @@ jobs:
           test -f "$NDK_DIR/build/cmake/android.toolchain.cmake"
           echo "NDK OK: $NDK_DIR"
 
+          # CMake 3.10.2 потрібен Gradle (externalNativeBuild version '3.10.2').
+          # Пряме посилання dl.google.com/cmake-3.10.2.4988404-linux.zip -> 404, тому тільки sdkmanager/AGP.
           CMAKE_DIR="$SDK/cmake/$SDK_CMAKE_VERSION"
           if [ ! -x "$CMAKE_DIR/bin/cmake" ]; then
-            echo "CMake $SDK_CMAKE_VERSION not in expected path, checking alternatives..."
-            # Try to find any cmake installed by sdkmanager
-            ALT_CMAKE="$(find "$SDK/cmake" -maxdepth 3 -type f -name cmake -path "*/bin/*" 2>/dev/null | head -n1 || true)"
-            if [ -n "$ALT_CMAKE" ]; then
-              CMAKE_DIR="$(dirname "$(dirname "$ALT_CMAKE")")"
-              echo "Found cmake at: $CMAKE_DIR"
-            else
-              echo "No SDK cmake found, using system cmake"
-              CMAKE_DIR=""
-            fi
+            CMAKE_DIR="$(find "$SDK/cmake" -maxdepth 3 -type f -name cmake -path '*/bin/*' 2>/dev/null | head -n1 || true)"
+            if [ -n "$CMAKE_DIR" ]; then CMAKE_DIR="$(dirname "$(dirname "$CMAKE_DIR")")"; fi
           fi
           if [ -n "$CMAKE_DIR" ] && [ -x "$CMAKE_DIR/bin/cmake" ]; then
             "$CMAKE_DIR/bin/cmake" --version | head -n1
           else
-            echo "Using system cmake: $(cmake --version | head -n1)"
+            echo "SDK CMake відсутній — AGP 7.0.3 докачає cmake;3.10.2.4988404 сам (ліцензії вже прийняті)"
             CMAKE_DIR=""
           fi
 
@@ -140,7 +141,7 @@ jobs:
           if [ ! -x "$BT/apksigner" ]; then
             BT="$(find "$SDK/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n1)"
           fi
-          test -x "$BT/apksigner"
+          echo "build-tools: ${BT:-none}"
 
           {
             echo "NDK=$NDK_DIR"
@@ -150,11 +151,8 @@ jobs:
             echo "SDK_CMAKE_DIR=$CMAKE_DIR"
             echo "ANDROID_BUILD_TOOLS=$BT"
           } >> "$GITHUB_ENV"
-          # cmake 3.10.2 ставимо першим у PATH (системний CMake 4.x ламає старі проєкти)
-          if [ -n "$CMAKE_DIR" ]; then
-            echo "$CMAKE_DIR/bin" >> "$GITHUB_PATH"
-          fi
-          echo "$BT" >> "$GITHUB_PATH"
+          if [ -n "$CMAKE_DIR" ]; then echo "$CMAKE_DIR/bin" >> "$GITHUB_PATH"; fi
+          if [ -n "$BT" ]; then echo "$BT" >> "$GITHUB_PATH"; fi
 
       - name: Build native dependencies (BoringSSL, libvpx, FFmpeg) for arm64-v8a
         working-directory: TMessagesProj/jni
@@ -165,8 +163,13 @@ jobs:
           ./patch_boringssl.sh
           ./build_boringssl.sh arm64
           ./build_libvpx_clang.sh arm64
-          ./patch_ffmpeg.sh
+          # ВАЖЛИВО: ffmpeg збираємо ДО patch_ffmpeg.sh.
+          # 0002-compilation-magic-2.patch вирізає #include з libavcodec/get_bits.h
+          # (потрібно лише для JNI/gifvideo.cpp), а власні файли ffmpeg (libavformat/avc.c)
+          # без цих інклюдів не компілюються (av_clip/av_assert2/FFMIN).
           ./build_ffmpeg_clang.sh arm64 || { echo "=== ffmpeg config.log ==="; tail -n 60 ffmpeg/ffbuild/config.log 2>/dev/null || true; exit 1; }
+          # тепер патчимо хедери + копіюємо їх у build/arm64-v8a/include для Gradle
+          ./patch_ffmpeg.sh
           ls -lh boringssl/build/arm64-v8a/ssl/libssl.a \
                  boringssl/build/arm64-v8a/crypto/libcrypto.a \
                  libvpx/build/arm64-v8a/lib/libvpx.a \
@@ -204,14 +207,19 @@ jobs:
           set -euo pipefail
           UNSIGNED="$(find TMessagesProj_App/build/outputs/apk -name '*.apk' | head -n1)"
           test -n "$UNSIGNED"
+          BT="${ANDROID_BUILD_TOOLS:-}"
+          if [ -z "$BT" ] || [ ! -x "$BT/apksigner" ]; then
+            BT="$(find "$ANDROID_SDK_ROOT/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n1)"
+          fi
+          echo "apksigner: $BT/apksigner"
           mkdir -p out
-          "$ANDROID_BUILD_TOOLS/zipalign" -p -f 4 "$UNSIGNED" out/OneTGMod-aligned.apk
-          "$ANDROID_BUILD_TOOLS/apksigner" sign \
+          "$BT/zipalign" -p -f 4 "$UNSIGNED" out/OneTGMod-aligned.apk
+          "$BT/apksigner" sign \
             --ks TMessagesProj/config/release.keystore \
             --ks-key-alias onetgmod --ks-pass "pass:android" --key-pass "pass:android" \
             --out out/OneTGMod.apk out/OneTGMod-aligned.apk
-          "$ANDROID_BUILD_TOOLS/apksigner" verify --print-certs out/OneTGMod.apk
-          "$ANDROID_BUILD_TOOLS/aapt2" dump badging out/OneTGMod.apk 2>/dev/null | head -n 3 || true
+          "$BT/apksigner" verify --print-certs out/OneTGMod.apk
+          "$BT/aapt2" dump badging out/OneTGMod.apk 2>/dev/null | head -n 3 || true
           echo "=== arm64 libs у APK: $(unzip -l out/OneTGMod.apk | grep -c 'lib/arm64-v8a/') ==="
           unzip -l out/OneTGMod.apk | grep -E 'lib/' | head -n 10 || true
           sha256sum out/OneTGMod.apk
