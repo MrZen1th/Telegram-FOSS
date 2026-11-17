@@ -90,10 +90,14 @@ jobs:
           fi
           echo "sdkmanager: $SDK_MGR"
           chmod +x "$SDK_MGR" 2>/dev/null || true
+          # sdkmanager on ubuntu-latest needs JDK 17+ but Gradle uses JDK 11
+          export SKIP_JDK_VERSION_CHECK=1
           yes | "$SDK_MGR" --licenses 2>&1 | tail -3 || true
-          echo "Installing platform-tools + build-tools + platforms via sdkmanager (timeout 180s)..."
-          timeout 180 "$SDK_MGR" --sdk_root="$SDK" "platform-tools" "platforms;android-33"                 "build-tools;33.0.0" 2>&1 | tail -20 || true
-          echo "Skipping NDK & CMake via sdkmanager (direct download below is faster)"
+          echo "Installing SDK components via sdkmanager (timeout 300s)..."
+          timeout 300 "$SDK_MGR" --sdk_root="$SDK" \
+                "platform-tools" "platforms;android-33" \
+                "build-tools;33.0.0" "cmake;$SDK_CMAKE_VERSION" 2>&1 | tail -30 || true
+          echo "NDK skipped in sdkmanager (direct download below is faster)"
 
           NDK_DIR="$SDK/ndk/$NDK_VERSION"
           if [ ! -f "$NDK_DIR/build/cmake/android.toolchain.cmake" ]; then
@@ -114,20 +118,23 @@ jobs:
 
           CMAKE_DIR="$SDK/cmake/$SDK_CMAKE_VERSION"
           if [ ! -x "$CMAKE_DIR/bin/cmake" ]; then
-            echo "CMake $SDK_CMAKE_VERSION відсутній -> пряме завантаження"
-            rm -rf "$CMAKE_DIR" "$WORK/cmakepkg"; mkdir -p "$WORK/cmakepkg"
-            curl -fL --retry 5 --retry-delay 5 -o "$WORK/cmake.zip" "$CMAKE_ZIP_URL"
-            unzip -q "$WORK/cmake.zip" -d "$WORK/cmakepkg"
-            if [ -x "$WORK/cmakepkg/bin/cmake" ]; then
-              mkdir -p "$CMAKE_DIR"; cp -a "$WORK/cmakepkg/." "$CMAKE_DIR/"
+            echo "CMake $SDK_CMAKE_VERSION not in expected path, checking alternatives..."
+            # Try to find any cmake installed by sdkmanager
+            ALT_CMAKE="$(find "$SDK/cmake" -maxdepth 3 -type f -name cmake -path "*/bin/*" 2>/dev/null | head -n1 || true)"
+            if [ -n "$ALT_CMAKE" ]; then
+              CMAKE_DIR="$(dirname "$(dirname "$ALT_CMAKE")")"
+              echo "Found cmake at: $CMAKE_DIR"
             else
-              SUB="$(dirname "$(dirname "$(find "$WORK/cmakepkg" -maxdepth 3 -type f -name cmake -path '*/bin/*' | head -n1)")")"
-              mkdir -p "$CMAKE_DIR"; cp -a "$SUB/." "$CMAKE_DIR/"
+              echo "No SDK cmake found, using system cmake"
+              CMAKE_DIR=""
             fi
-            rm -rf "$WORK/cmakepkg" "$WORK/cmake.zip"
           fi
-          test -x "$CMAKE_DIR/bin/cmake"
-          "$CMAKE_DIR/bin/cmake" --version | head -n1
+          if [ -n "$CMAKE_DIR" ] && [ -x "$CMAKE_DIR/bin/cmake" ]; then
+            "$CMAKE_DIR/bin/cmake" --version | head -n1
+          else
+            echo "Using system cmake: $(cmake --version | head -n1)"
+            CMAKE_DIR=""
+          fi
 
           BT="$SDK/build-tools/33.0.0"
           if [ ! -x "$BT/apksigner" ]; then
@@ -144,7 +151,9 @@ jobs:
             echo "ANDROID_BUILD_TOOLS=$BT"
           } >> "$GITHUB_ENV"
           # cmake 3.10.2 ставимо першим у PATH (системний CMake 4.x ламає старі проєкти)
-          echo "$CMAKE_DIR/bin" >> "$GITHUB_PATH"
+          if [ -n "$CMAKE_DIR" ]; then
+            echo "$CMAKE_DIR/bin" >> "$GITHUB_PATH"
+          fi
           echo "$BT" >> "$GITHUB_PATH"
 
       - name: Build native dependencies (BoringSSL, libvpx, FFmpeg) for arm64-v8a
