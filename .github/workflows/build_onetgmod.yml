@@ -197,16 +197,19 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x gradlew
-          ./gradlew :TMessagesProj_App:assembleAfatRelease --stacktrace --no-daemon \
-            -Pandroid.builder.sdkDownload=true
+          # Діагностика: збираємо ОБИДВА варіанти — release (з R8) і debug (без R8),
+          # щоб однозначно з'ясувати, чи крэш на пристрої спричинений мініфікацією.
+          ./gradlew :TMessagesProj_App:assembleAfatRelease :TMessagesProj_App:assembleAfatDebug \
+            --stacktrace --no-daemon -Pandroid.builder.sdkDownload=true
           echo "=== outputs ==="
           find TMessagesProj_App/build/outputs/apk -name '*.apk' -exec ls -lh {} +
 
       - name: Sign + align APK
         run: |
           set -euo pipefail
-          UNSIGNED="$(find TMessagesProj_App/build/outputs/apk -name '*.apk' | head -n1)"
+          UNSIGNED="$(find TMessagesProj_App/build/outputs/apk/afat/release -name '*.apk' | head -n1)"
           test -n "$UNSIGNED"
+          DEBUGAPK="$(find TMessagesProj_App/build/outputs/apk/afat/debug -name '*.apk' | head -n1 || true)"
           BT="${ANDROID_BUILD_TOOLS:-}"
           if [ -z "$BT" ] || [ ! -x "$BT/apksigner" ]; then
             BT="$(find "$ANDROID_SDK_ROOT/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n1)"
@@ -220,6 +223,13 @@ jobs:
             --out out/OneTGMod.apk out/OneTGMod-aligned.apk
           "$BT/apksigner" verify --print-certs out/OneTGMod.apk
           "$BT/aapt2" dump badging out/OneTGMod.apk 2>/dev/null | head -n 3 || true
+          if [ -n "$DEBUGAPK" ]; then
+            "$BT/zipalign" -p -f 4 "$DEBUGAPK" out/OneTGMod-debug-aligned.apk
+            "$BT/apksigner" sign --ks TMessagesProj/config/release.keystore \
+              --ks-key-alias onetgmod --ks-pass "pass:android" --key-pass "pass:android" \
+              --out out/OneTGMod-debug.apk out/OneTGMod-debug-aligned.apk
+            echo "signed debug APK: $(ls -lh out/OneTGMod-debug.apk | awk '{print $5}')"
+          fi
           echo "=== arm64 libs у APK: $(unzip -l out/OneTGMod.apk | grep -c 'lib/arm64-v8a/') ==="
           unzip -l out/OneTGMod.apk | grep -E 'lib/' | head -n 10 || true
           sha256sum out/OneTGMod.apk
@@ -228,6 +238,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: OneTGMod-apk
-          path: out/OneTGMod.apk
+          path: |
+            out/OneTGMod.apk
+            out/OneTGMod-debug.apk
           if-no-files-found: error
           retention-days: 14
