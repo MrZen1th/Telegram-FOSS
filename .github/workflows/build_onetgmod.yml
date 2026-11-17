@@ -45,10 +45,12 @@ jobs:
           cd TMessagesProj/jni
           chmod +x *.sh
           [ -f patch_boringssl.sh ] && ./patch_boringssl.sh
-          [ -f build_boringssl.sh ] && ./build_boringssl.sh arm64-v8a
+          [ -f build_boringssl.sh ] && ./build_boringssl.sh
           [ -f patch_ffmpeg.sh ] && ./patch_ffmpeg.sh
-          [ -f build_ffmpeg_clang.sh ] && ./build_ffmpeg_clang.sh arm64-v8a
-          [ -f build_libvpx_clang.sh ] && ./build_libvpx_clang.sh arm64-v8a
+          if [ -f build_ffmpeg_clang.sh ]; then
+            ./build_ffmpeg_clang.sh || { tail -n 50 ffmpeg/ffbuild/config.log 2>/dev/null || true; exit 1; }
+          fi
+          [ -f build_libvpx_clang.sh ] && ./build_libvpx_clang.sh
           ls -lh ffmpeg/build/arm64-v8a/lib/libswscale.a
 
       - name: Prepare API_KEYS and Release Keystore
