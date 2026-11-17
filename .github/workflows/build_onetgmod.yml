@@ -5,14 +5,27 @@ on:
     branches: [ master, main ]
   workflow_dispatch:
 
+concurrency:
+  group: onetgmod-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      NDK_VERSION: "21.4.7075529"
+      SDK_CMAKE_VERSION: "3.10.2.4988404"
+      NDK_ZIP_URL: "https://dl.google.com/android/repository/android-ndk-r21e-linux-x86_64.zip"
+      CMAKE_ZIP_URL: "https://dl.google.com/android/repository/cmake-3.10.2.4988404-linux.zip"
+      CMDLINE_ZIP_URL: "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 1
 
       - name: Set up JDK 11
         uses: actions/setup-java@v4
@@ -20,93 +33,178 @@ jobs:
           java-version: "11"
           distribution: "temurin"
 
-      - name: Install Native Build Tools & NDK 21 Compatibility Libs
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle', 'gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Install host build tools + NDK 21 soname shims
         run: |
+          set -euo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y yasm nasm ninja-build cmake build-essential pkg-config libncurses6
-          sudo ln -sf /usr/lib/x86_64-linux-gnu/libncursesw.so.6 /usr/lib/x86_64-linux-gnu/libncurses.so.5
-          sudo ln -sf /usr/lib/x86_64-linux-gnu/libtinfo.so.6 /usr/lib/x86_64-linux-gnu/libtinfo.so.5
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            yasm nasm ninja-build build-essential pkg-config unzip zip curl ca-certificates
+          for f in /usr/lib/x86_64-linux-gnu/libtinfo.so.6 /lib/x86_64-linux-gnu/libtinfo.so.6; do
+            if [ -e "$f" ]; then sudo ln -sf "$f" /usr/lib/x86_64-linux-gnu/libtinfo.so.5; break; fi
+          done
+          for f in /usr/lib/x86_64-linux-gnu/libncursesw.so.6 /lib/x86_64-linux-gnu/libncursesw.so.6; do
+            if [ -e "$f" ]; then sudo ln -sf "$f" /usr/lib/x86_64-linux-gnu/libncurses.so.5; break; fi
+          done
+          sudo ldconfig || true
+          echo "ninja: $(command -v ninja)  yasm: $(command -v yasm)"
 
-      - name: Accept Android SDK Licenses and Install NDK
+      - name: Provision Android SDK + NDK 21.4.7075529 + CMake 3.10.2
         run: |
-          SDK_MGR="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          if [ -x "$SDK_MGR" ]; then
-            yes | "$SDK_MGR" --licenses >/dev/null 2>&1 || true
-            yes | "$SDK_MGR" "ndk;21.4.7075529" "cmake;3.10.2.4988404" >/dev/null 2>&1 || true
+          set -euo pipefail
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          export ANDROID_SDK_ROOT="$SDK" ANDROID_HOME="$SDK"
+          mkdir -p "$SDK/ndk" "$SDK/cmake" "$SDK/licenses" "$SDK/build-tools" "$SDK/platforms"
+          WORK="$RUNNER_TEMP/onetgmod"; mkdir -p "$WORK"
+
+          # наперед приймаємо ліцензії, щоб AGP міг сам докачати sdk-компоненти
+          printf '\n24333f8a63b6825ea9c5514f83c2829b004d1fee\n8933bad161af4178b1185d1a37fbf41ea5269c55\nd56f5187479451eabf01fb78af6dfcb131a6481e\n' > "$SDK/licenses/android-sdk-license"
+          printf '\n84831b9409646a918e30573bab4c9c91346d8abd\n504667f4c0de7af1a06de9f4b1727b84351f2910\n' > "$SDK/licenses/android-sdk-preview-license"
+
+          SDK_MGR=""
+          for p in "$SDK/cmdline-tools/latest/bin/sdkmanager" "$SDK/cmdline-tools/bin/sdkmanager" "$SDK/tools/bin/sdkmanager"; do
+            if [ -x "$p" ]; then SDK_MGR="$p"; break; fi
+          done
+          if [ -z "$SDK_MGR" ]; then
+            SDK_MGR="$(find "$SDK" -maxdepth 6 -type f -name sdkmanager 2>/dev/null | head -n1 || true)"
           fi
+          if [ -z "$SDK_MGR" ]; then
+            SDK_MGR="$(command -v sdkmanager 2>/dev/null || true)"
+          fi
+          if [ -z "$SDK_MGR" ]; then
+            echo "sdkmanager не знайдено -> ставлю cmdline-tools"
+            curl -fsSL --retry 5 --retry-delay 5 -o "$WORK/cmdline.zip" "$CMDLINE_ZIP_URL"
+            rm -rf "$WORK/cmdlinetools" "$SDK/cmdline-tools/latest"
+            unzip -q "$WORK/cmdline.zip" -d "$WORK/cmdlinetools"
+            mkdir -p "$SDK/cmdline-tools"
+            mv "$WORK/cmdlinetools/cmdline-tools" "$SDK/cmdline-tools/latest"
+            SDK_MGR="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          echo "sdkmanager: $SDK_MGR"
+          chmod +x "$SDK_MGR" || true
+          yes | "$SDK_MGR" --licenses >/dev/null 2>&1 || true
+          yes | "$SDK_MGR" --sdk_root="$SDK" "platform-tools" "platforms;android-33" \
+                "build-tools;33.0.0" "cmake;$SDK_CMAKE_VERSION" "ndk;$NDK_VERSION" >/dev/null 2>&1 || true
 
-      - name: Build Native Dependencies (BoringSSL, FFmpeg, libvpx)
+          NDK_DIR="$SDK/ndk/$NDK_VERSION"
+          if [ ! -f "$NDK_DIR/build/cmake/android.toolchain.cmake" ]; then
+            echo "NDK $NDK_VERSION відсутній -> пряме завантаження android-ndk-r21e"
+            rm -rf "$NDK_DIR" "$WORK/ndk"; mkdir -p "$NDK_DIR" "$WORK/ndk"
+            curl -fL --retry 5 --retry-delay 5 -o "$WORK/ndk.zip" "$NDK_ZIP_URL"
+            unzip -q "$WORK/ndk.zip" -d "$WORK/ndk"
+            mv "$WORK/ndk/android-ndk-r21e/." "$NDK_DIR/"
+            rm -rf "$WORK/ndk" "$WORK/ndk.zip"
+          fi
+          test -f "$NDK_DIR/build/cmake/android.toolchain.cmake"
+          echo "NDK OK: $NDK_DIR"
+
+          CMAKE_DIR="$SDK/cmake/$SDK_CMAKE_VERSION"
+          if [ ! -x "$CMAKE_DIR/bin/cmake" ]; then
+            echo "CMake $SDK_CMAKE_VERSION відсутній -> пряме завантаження"
+            rm -rf "$CMAKE_DIR" "$WORK/cmakepkg"; mkdir -p "$WORK/cmakepkg"
+            curl -fL --retry 5 --retry-delay 5 -o "$WORK/cmake.zip" "$CMAKE_ZIP_URL"
+            unzip -q "$WORK/cmake.zip" -d "$WORK/cmakepkg"
+            if [ -x "$WORK/cmakepkg/bin/cmake" ]; then
+              mkdir -p "$CMAKE_DIR"; cp -a "$WORK/cmakepkg/." "$CMAKE_DIR/"
+            else
+              SUB="$(dirname "$(dirname "$(find "$WORK/cmakepkg" -maxdepth 3 -type f -name cmake -path '*/bin/*' | head -n1)")")"
+              mkdir -p "$CMAKE_DIR"; cp -a "$SUB/." "$CMAKE_DIR/"
+            fi
+            rm -rf "$WORK/cmakepkg" "$WORK/cmake.zip"
+          fi
+          test -x "$CMAKE_DIR/bin/cmake"
+          "$CMAKE_DIR/bin/cmake" --version | head -n1
+
+          BT="$SDK/build-tools/33.0.0"
+          if [ ! -x "$BT/apksigner" ]; then
+            BT="$(find "$SDK/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n1)"
+          fi
+          test -x "$BT/apksigner"
+
+          {
+            echo "NDK=$NDK_DIR"
+            echo "ANDROID_NDK_HOME=$NDK_DIR"
+            echo "ANDROID_NDK_ROOT=$NDK_DIR"
+            echo "NINJA_PATH=$(command -v ninja)"
+            echo "SDK_CMAKE_DIR=$CMAKE_DIR"
+            echo "ANDROID_BUILD_TOOLS=$BT"
+          } >> "$GITHUB_ENV"
+          # cmake 3.10.2 ставимо першим у PATH (системний CMake 4.x ламає старі проєкти)
+          echo "$CMAKE_DIR/bin" >> "$GITHUB_PATH"
+          echo "$BT" >> "$GITHUB_PATH"
+
+      - name: Build native dependencies (BoringSSL, libvpx, FFmpeg) for arm64-v8a
+        working-directory: TMessagesProj/jni
         run: |
-          export NDK="$ANDROID_HOME/ndk/21.4.7075529"
-          export ANDROID_NDK_HOME="$NDK"
-          export ANDROID_NDK_ROOT="$NDK"
-          export NINJA_PATH="$(command -v ninja)"
-          export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
-          cd TMessagesProj/jni
+          set -euo pipefail
+          echo "NDK=$NDK  NINJA_PATH=$NINJA_PATH  cmake=$(command -v cmake) $(cmake --version | head -n1)"
           chmod +x *.sh
-          [ -f patch_boringssl.sh ] && ./patch_boringssl.sh
-          [ -f build_boringssl.sh ] && ./build_boringssl.sh
-          [ -f patch_ffmpeg.sh ] && ./patch_ffmpeg.sh
-          if [ -f build_ffmpeg_clang.sh ]; then
-            ./build_ffmpeg_clang.sh || { tail -n 50 ffmpeg/ffbuild/config.log 2>/dev/null || true; exit 1; }
-          fi
-          [ -f build_libvpx_clang.sh ] && ./build_libvpx_clang.sh
-          ls -lh ffmpeg/build/arm64-v8a/lib/libswscale.a
+          ./patch_boringssl.sh
+          ./build_boringssl.sh arm64
+          ./build_libvpx_clang.sh arm64
+          ./patch_ffmpeg.sh
+          ./build_ffmpeg_clang.sh arm64 || { echo "=== ffmpeg config.log ==="; tail -n 60 ffmpeg/ffbuild/config.log 2>/dev/null || true; exit 1; }
+          ls -lh boringssl/build/arm64-v8a/ssl/libssl.a \
+                 boringssl/build/arm64-v8a/crypto/libcrypto.a \
+                 libvpx/build/arm64-v8a/lib/libvpx.a \
+                 ffmpeg/build/arm64-v8a/lib/libswscale.a \
+                 ffmpeg/build/arm64-v8a/lib/libavcodec.a
 
-      - name: Prepare API_KEYS and Release Keystore
+      - name: Prepare API_KEYS + signing keystore + local.properties
         run: |
-          printf "APP_ID=34710776\nAPP_HASH=95246192dbd8a64e3a6242a00119b547\n" > API_KEYS
+          set -euo pipefail
+          printf "APP_ID=%s\nAPP_HASH=%s\n" "34710776" "95246192dbd8a64e3a6242a00119b547" > API_KEYS
           cp API_KEYS TMessagesProj/API_KEYS
           cp API_KEYS TMessagesProj_App/API_KEYS
           mkdir -p TMessagesProj/config
-          keytool -genkey -v -keystore TMessagesProj/config/release.keystore -alias android \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -storepass android -keypass android \
-            -dname "CN=OneTGMod, OU=Mod, O=OneTG, L=UA, S=UA, C=UA"
-          cp TMessagesProj/config/release.keystore release.keystore
-          cp TMessagesProj/config/release.keystore TMessagesProj_App/release.keystore
-          printf "sdk.dir=%s\n" "$ANDROID_HOME" > local.properties
-
-      - name: Build OneTGMod APK
-        run: |
-          export NDK="$ANDROID_HOME/ndk/21.4.7075529"
-          export ANDROID_NDK_HOME="$NDK"
-          chmod +x gradlew
-          ALL_TASKS=$(./gradlew :TMessagesProj_App:tasks --all | grep -oE 'TMessagesProj_App:assemble[A-Za-z0-9_]*Release' | sort -u || true)
-          echo "Available release tasks:"
-          echo "$ALL_TASKS"
-          TASK=""
-          for CAND in \
-            "TMessagesProj_App:assembleArm64FossRelease" \
-            "TMessagesProj_App:assembleArm64Release" \
-            "TMessagesProj_App:assembleAfatFossRelease" \
-            "TMessagesProj_App:assembleAfatRelease" \
-            "TMessagesProj_App:assembleFossRelease" \
-            "TMessagesProj_App:assembleRelease"; do
-            if echo "$ALL_TASKS" | grep -qx "$CAND"; then
-              TASK=":$CAND"
-              break
-            fi
-          done
-          if [ -z "$TASK" ]; then
-            FIRST=$(echo "$ALL_TASKS" | head -n 1)
-            [ -n "$FIRST" ] && TASK=":$FIRST" || TASK=":TMessagesProj_App:assembleRelease"
+          if [ ! -f TMessagesProj/config/release.keystore ]; then
+            echo "::warning::release.keystore відсутній у репозиторії — генерую тимчасовий (підпис зміниться!)"
+            keytool -genkeypair -v -keystore TMessagesProj/config/release.keystore -alias onetgmod \
+              -keyalg RSA -keysize 2048 -validity 10000 -storetype JKS \
+              -storepass android -keypass android \
+              -dname "CN=OneTGMod, OU=Mod, O=OneTG, L=UA, S=UA, C=UA" >/dev/null 2>&1
           fi
-          echo "Selected Gradle task: $TASK"
-          ./gradlew "$TASK" --stacktrace \
-            -PRELEASE_STORE_FILE=config/release.keystore \
-            -PRELEASE_STORE_PASSWORD=android \
-            -PRELEASE_KEY_ALIAS=android \
-            -PRELEASE_KEY_PASSWORD=android
+          printf "sdk.dir=%s\n" "$ANDROID_SDK_ROOT" > local.properties
+          ls -l TMessagesProj/config/release.keystore
 
-      - name: Collect APK
+      - name: Build OneTGMod APK (afatRelease, arm64-v8a)
         run: |
-          mkdir -p out_apk
-          find . -path "*/build/outputs/apk/*" -name "*.apk" -exec cp {} out_apk/OneTGMod.apk \;
-          ls -lh out_apk/
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew :TMessagesProj_App:assembleAfatRelease --stacktrace --no-daemon \
+            -Pandroid.builder.sdkDownload=true
+          echo "=== outputs ==="
+          find TMessagesProj_App/build/outputs/apk -name '*.apk' -exec ls -lh {} +
 
-      - name: Upload OneTGMod Artifact
+      - name: Sign + align APK
+        run: |
+          set -euo pipefail
+          UNSIGNED="$(find TMessagesProj_App/build/outputs/apk -name '*.apk' | head -n1)"
+          test -n "$UNSIGNED"
+          mkdir -p out
+          "$ANDROID_BUILD_TOOLS/zipalign" -p -f 4 "$UNSIGNED" out/OneTGMod-aligned.apk
+          "$ANDROID_BUILD_TOOLS/apksigner" sign \
+            --ks TMessagesProj/config/release.keystore \
+            --ks-key-alias onetgmod --ks-pass "pass:android" --key-pass "pass:android" \
+            --out out/OneTGMod.apk out/OneTGMod-aligned.apk
+          "$ANDROID_BUILD_TOOLS/apksigner" verify --print-certs out/OneTGMod.apk
+          "$ANDROID_BUILD_TOOLS/aapt2" dump badging out/OneTGMod.apk 2>/dev/null | head -n 3 || true
+          echo "=== arm64 libs у APK: $(unzip -l out/OneTGMod.apk | grep -c 'lib/arm64-v8a/') ==="
+          unzip -l out/OneTGMod.apk | grep -E 'lib/' | head -n 10 || true
+          sha256sum out/OneTGMod.apk
+
+      - name: Upload OneTGMod APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: OneTGMod-apk
-          path: out_apk/OneTGMod.apk
+          path: out/OneTGMod.apk
+          if-no-files-found: error
+          retention-days: 14

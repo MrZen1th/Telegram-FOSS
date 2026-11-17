@@ -60,6 +60,7 @@ public class FlagSecureReason {
     }
 
     private static void updateWindowSecure(Window window) {
+        if (true) return;
         if (window == null) {
             return;
         }
