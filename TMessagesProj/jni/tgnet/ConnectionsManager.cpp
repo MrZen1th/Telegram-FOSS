@@ -2272,6 +2272,8 @@ void ConnectionsManager::sendMessagesToConnection(std::vector<std::unique_ptr<Ne
             currentMessages.clear();
         }
     }
+    // onetgmod: очищаємо вхідний вектор, усі елементи вже переміщені
+    messages.clear();
 }
 
 void ConnectionsManager::sendMessagesToConnectionWithConfirmation(std::vector<std::unique_ptr<NetworkMessage>> &messages, Connection *connection, bool reportAck) {
@@ -2937,10 +2939,13 @@ void ConnectionsManager::processRequestQueue(uint32_t connectionTypes, uint32_t 
             bool scannedPreviousRequests = false;
             bool needQuickAck = false;
             int64_t lastSentMessageRpcId = 0;
-            std::vector<std::unique_ptr<NetworkMessage>> &array = genericMessagesToDatacenter.second;
+            std::vector<std::unique_ptr<NetworkMessage>> array = std::move(genericMessagesToDatacenter.second);
             size_t count = array.size();
             for (uint32_t b = 0; b < count; b++) {
                 NetworkMessage *networkMessage = array[b].get();
+                if (networkMessage == nullptr) {
+                    continue;
+                }
                 if (networkMessage->needQuickAck) {
                     needQuickAck = true;
                 }
@@ -2951,6 +2956,9 @@ void ConnectionsManager::processRequestQueue(uint32_t connectionTypes, uint32_t 
                         std::vector<int64_t> currentRequests;
                         for (uint32_t a = 0; a < count; a++) {
                             NetworkMessage *currentNetworkMessage = array[a].get();
+                            if (currentNetworkMessage == nullptr) {
+                                continue;
+                            }
                             if (currentNetworkMessage->invokeAfter) {
                                 currentRequests.push_back(currentNetworkMessage->message->msg_id);
                             }
@@ -3004,7 +3012,7 @@ void ConnectionsManager::processRequestQueue(uint32_t connectionTypes, uint32_t 
     for (auto & tempMessagesToDatacenter : tempMessagesToDatacenters) {
         Datacenter *datacenter = getDatacenterWithId(tempMessagesToDatacenter.first);
         if (datacenter != nullptr) {
-            std::vector<std::unique_ptr<NetworkMessage>> &array = tempMessagesToDatacenter.second;
+            std::vector<std::unique_ptr<NetworkMessage>> array = std::move(tempMessagesToDatacenter.second);
             sendMessagesToConnectionWithConfirmation(array, datacenter->getTempConnection(true), false);
         }
     }
@@ -3012,7 +3020,7 @@ void ConnectionsManager::processRequestQueue(uint32_t connectionTypes, uint32_t 
     for (auto & genericMediaMessagesToDatacenter : genericMediaMessagesToDatacenters) {
         Datacenter *datacenter = getDatacenterWithId(genericMediaMessagesToDatacenter.first);
         if (datacenter != nullptr) {
-            std::vector<std::unique_ptr<NetworkMessage>> &array = genericMediaMessagesToDatacenter.second;
+            std::vector<std::unique_ptr<NetworkMessage>> array = std::move(genericMediaMessagesToDatacenter.second);
             sendMessagesToConnectionWithConfirmation(array, datacenter->getGenericMediaConnection(true, 1), false);
         }
     }
