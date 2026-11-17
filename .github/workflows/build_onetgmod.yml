@@ -20,6 +20,13 @@ jobs:
           java-version: "17"
           distribution: "temurin"
 
+      - name: Accept Android SDK Licenses
+        run: |
+          SDK_MGR="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ -x "$SDK_MGR" ]; then
+            yes | "$SDK_MGR" --licenses >/dev/null 2>&1 || true
+          fi
+
       - name: Generate Release Keystore
         run: |
           mkdir -p TMessagesProj/config
@@ -32,7 +39,27 @@ jobs:
       - name: Build OneTGMod APK
         run: |
           chmod +x gradlew
-          ./gradlew :TMessagesProj_App:assembleAfatRelease \
+          ALL_TASKS=$(./gradlew :TMessagesProj_App:tasks --all | grep -oE 'TMessagesProj_App:assemble[A-Za-z0-9_]*Release' | sort -u || true)
+          echo "Available release tasks:"
+          echo "$ALL_TASKS"
+          TASK=""
+          for CAND in \
+            "TMessagesProj_App:assembleAfatFossRelease" \
+            "TMessagesProj_App:assembleAfatRelease" \
+            "TMessagesProj_App:assembleFossRelease" \
+            "TMessagesProj_App:assembleArm64Release" \
+            "TMessagesProj_App:assembleRelease"; do
+            if echo "$ALL_TASKS" | grep -qx "$CAND"; then
+              TASK=":$CAND"
+              break
+            fi
+          done
+          if [ -z "$TASK" ]; then
+            FIRST=$(echo "$ALL_TASKS" | head -n 1)
+            [ -n "$FIRST" ] && TASK=":$FIRST" || TASK=":TMessagesProj_App:assembleRelease"
+          fi
+          echo "Selected Gradle task: $TASK"
+          ./gradlew "$TASK" --stacktrace \
             -PRELEASE_STORE_FILE=config/release.keystore \
             -PRELEASE_STORE_PASSWORD=android \
             -PRELEASE_KEY_ALIAS=android \

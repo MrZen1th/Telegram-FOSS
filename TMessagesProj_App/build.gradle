@@ -48,7 +48,6 @@ android {
         debug {
             debuggable true
             jniDebuggable true
-            applicationIdSuffix ".beta"
             minifyEnabled false
             shrinkResources false
             multiDexEnabled true
@@ -59,7 +58,6 @@ android {
         standalone {
             debuggable false
             jniDebuggable false
-            applicationIdSuffix ".web"
             minifyEnabled true
             multiDexEnabled true
             proguardFiles getDefaultProguardFile('proguard-android.txt'), '../TMessagesProj/proguard-rules.pro'
